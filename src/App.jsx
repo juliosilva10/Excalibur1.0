@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import DerivAPI from './services/derivApi';
 import ContractsAPI from './services/contractsApi';
 import ActiveSymbolsAPI from './services/activeSymbolsApi';
+import ProposalAPI from './services/proposalApi';
 import './App.css';
 
 const SYMBOL_KEYWORDS = [
@@ -124,6 +125,18 @@ function App() {
   const [expandedCategory, setExpandedCategory] = useState(null);
   const [categoryContracts, setCategoryContracts] = useState({});
   const [categoryLoading, setCategoryLoading] = useState({});
+  
+  // Estados para o card de proposta
+  const [selectedContract, setSelectedContract] = useState(null);
+  const [stake, setStake] = useState('10'); // Valor padrão
+  const [stakeError, setStakeError] = useState('');
+  const [duration, setDuration] = useState('5'); // Valor padrão
+  const [durationUnit, setDurationUnit] = useState('m');
+  const [barrier, setBarrier] = useState('');
+  const [digit, setDigit] = useState('');
+  const [proposal, setProposal] = useState(null);
+  const [proposalLoading, setProposalLoading] = useState(false);
+  
   const wsRef = useRef(null);
   const apiRef = useRef(null);
   const pingInterval = useRef(null);
@@ -267,6 +280,187 @@ function App() {
     }
   }
 
+  // Funções para o card de proposta
+  const handleContractSelect = (contract) => {
+    console.log('🔵 CONTRATO SELECIONADO:', contract);
+    console.log('🔵 Tipo do contrato:', contract.contract_type);
+    console.log('🔵 Símbolo:', contract.symbol);
+    console.log('🔵 Barreiras necessárias:', contract.barriers);
+    
+    setSelectedContract(contract);
+    setStake('10'); // Alterado para 10
+    setStakeError('');
+    setDuration('5');
+    setBarrier('');
+    setDigit('');
+    setProposal(null);
+    
+    console.log('🔵 Estados atualizados - forçando cálculo em 2 segundos...');
+    
+    // Forçar cálculo da proposta após seleção
+    setTimeout(() => {
+      console.log('🔵 ⏰ TIMEOUT DE SELEÇÃO (2s) executado - chamando calculateProposal');
+      calculateProposal();
+    }, 2000);
+  };
+
+  const validateStake = (value) => {
+    if (!selectedContract) return '';
+    
+    const numValue = parseFloat(value);
+    if (isNaN(numValue)) return 'Valor inválido';
+    
+    if (numValue < selectedContract.min_stake) {
+      return `Mínimo: ${selectedContract.min_stake}`;
+    }
+    if (numValue > selectedContract.max_stake) {
+      return `Máximo: ${selectedContract.max_stake}`;
+    }
+    return '';
+  };
+
+  const handleStakeChange = (e) => {
+    const value = e.target.value;
+    setStake(value);
+    setStakeError(validateStake(value));
+  };
+
+  const handleDurationChange = (e) => {
+    setDuration(e.target.value);
+  };
+
+  const handleDurationUnitChange = (e) => {
+    setDurationUnit(e.target.value);
+  };
+
+  const handleBarrierChange = (e) => {
+    setBarrier(e.target.value);
+  };
+
+  const handleDigitChange = (e) => {
+    setDigit(e.target.value);
+  };
+
+  const calculateProposal = async () => {
+    console.log('🟡 === CALCULATE PROPOSAL INICIADO ===');
+    console.log('🟡 selectedContract:', !!selectedContract, selectedContract?.contract_type);
+    console.log('🟡 stake:', stake);
+    console.log('🟡 duration:', duration);
+    console.log('🟡 connected:', connected);
+    console.log('🟡 wsRef.current:', !!wsRef.current);
+    
+    if (!connected || !wsRef.current) {
+      console.log('🟡 ❌ Retornando - não conectado');
+      return;
+    }
+    
+    if (!selectedContract || !stake || !duration) {
+      console.log('🟡 ❌ Retornando - dados básicos faltando');
+      console.log('🟡 selectedContract:', !!selectedContract);
+      console.log('🟡 stake:', stake);
+      console.log('🟡 duration:', duration);
+      return;
+    }
+    
+    console.log('🟡 ✅ Todas as condições atendidas - prosseguindo com cálculo');
+    setProposalLoading(true);
+    
+    try {
+      const proposalApi = new ProposalAPI(wsRef.current);
+      console.log('🟡 📝 Criando parâmetros da proposta...');
+      
+      // Usar dados reais do formulário com estrutura correta da API
+      const proposalParams = {
+        contract_type: selectedContract.contract_type,
+        symbol: "R_100", // Símbolo padrão para teste
+        amount: parseFloat(stake),
+        basis: "stake", // Voltando para stake como padrão da API
+        currency: "USD"
+      };
+
+      // Para contratos ACCU (Accumulator), não usar duration/duration_unit
+      if (selectedContract.contract_type !== 'ACCU') {
+        proposalParams.duration = parseInt(duration);
+        proposalParams.duration_unit = durationUnit;
+        console.log('🟡 ⏰ Duração adicionada para contrato não-ACCU:', proposalParams.duration, proposalParams.duration_unit);
+      } else {
+        console.log('🟡 ⏰ Contrato ACCU detectado - sem parâmetros de duração');
+      }
+
+      console.log('🟡 📝 Parâmetros básicos criados:', proposalParams);
+
+      // Adicionar barreiras conforme o tipo de contrato
+      const needsBarrier = selectedContract.barriers === 1;
+      const needsDigit = ['DIGITEVEN', 'DIGITODD', 'DIGITOVER', 'DIGITUNDER', 'DIGITDIFF', 'DIGITMATCH'].includes(selectedContract.contract_type);
+      
+      console.log('🟡 🔍 Verificando necessidades especiais:');
+      console.log('🟡   needsBarrier:', needsBarrier, '| barrier atual:', barrier);
+      console.log('🟡   needsDigit:', needsDigit, '| digit atual:', digit);
+      
+      if (needsBarrier && barrier) {
+        // Para contratos CALL/PUT, usar valor numérico relativo ao spot
+        if (['CALL', 'PUT'].includes(selectedContract.contract_type)) {
+          proposalParams.barrier = parseFloat(barrier);
+        } else {
+          proposalParams.barrier = barrier;
+        }
+        console.log('🟡 ✅ Barreira adicionada:', proposalParams.barrier);
+      }
+      
+      if (needsDigit && digit !== '') {
+        proposalParams.barrier = parseInt(digit);
+        console.log('🟡 ✅ Dígito adicionado:', proposalParams.barrier);
+      }
+
+      console.log('🟡 📋 PARÂMETROS FINAIS DA PROPOSTA:', proposalParams);
+      console.log('🟡 📋 Contrato selecionado completo:', selectedContract);
+      
+      console.log('🟡 🚀 Enviando requisição para ProposalAPI...');
+      const result = await proposalApi.getContractProposal(proposalParams);
+      console.log('🟡 ✅ RESULTADO RECEBIDO:', result);
+      
+      if (result && result.payout) {
+        setProposal(result);
+        console.log('Proposta salva com sucesso - payout:', result.payout);
+      } else {
+        console.warn('Resultado da proposta não contém payout válido:', result);
+        setProposal(null);
+      }
+    } catch (error) {
+      console.error('Erro ao calcular proposta:', error);
+      console.error('Tipo do erro:', typeof error);
+      console.error('Detalhes do erro:', error.message || error);
+      setProposal(null);
+    }
+    
+    setProposalLoading(false);
+  };
+
+  // Executar cálculo quando parâmetros mudarem
+  // Executar cálculo quando parâmetros mudarem
+  useEffect(() => {
+    console.log('useEffect triggered - recalculando proposta');
+    console.log('selectedContract:', !!selectedContract);
+    console.log('stake:', stake);
+    console.log('duration:', duration);
+    console.log('connected:', connected);
+    
+    if (selectedContract && stake && duration && connected && !stakeError) {
+      console.log('Condições atendidas - iniciando timer para recálculo');
+      const timer = setTimeout(() => {
+        console.log('🔵 ⏰ TIMEOUT DO USEEFFECT (1s) executado - chamando calculateProposal');
+        calculateProposal();
+      }, 1000); // 1 segundo de debounce
+      
+      return () => {
+        console.log('Limpando timer');
+        clearTimeout(timer);
+      };
+    } else {
+      console.log('Condições não atendidas para recálculo automático');
+    }
+  }, [selectedContract, stake, duration, durationUnit, barrier, digit, connected, stakeError]);
+
   async function handleSymbolClick(symbol) {
     if (expandedSymbol === symbol) {
       setExpandedSymbol(null);
@@ -309,64 +503,215 @@ function App() {
 
   return (
     <div className="app" style={{display: 'block'}}>
-      <div style={{position: 'fixed', top: 0, left: 0, zIndex: 10, width: 320}}>
-        <div className="account-panel">
-          <div className="account-info">
-            <h2>Account Details</h2>
-            <p>Account Code: {accountInfo.accountCode || '---'}</p>
-            <p>Account Type: {accountInfo.accountType || '---'}</p>
-            <p>Balance: {accountInfo.balance || '---'}</p>
+      <div style={{position: 'fixed', top: 0, left: 0, zIndex: 10, display: 'flex', gap: '12px'}}>
+        {/* Container para os dois primeiros cards */}
+        <div style={{display: 'flex', flexDirection: 'column'}}>
+          <div className="account-panel" style={{position: 'relative'}}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', width: '100%', marginBottom: 10}}>
+              <div className="account-info" style={{flex: 1}}>
+                <h2>Account Details</h2>
+                <p>Account Code: {accountInfo.accountCode || '---'}</p>
+                <p>Account Type: {accountInfo.accountType || '---'}</p>
+                <p>Balance: {accountInfo.balance || '---'}</p>
+              </div>
+              <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', marginLeft: 10}}>
+                <div className="status-block" style={{display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: 8}}>
+                  <span className="status-dot" style={{background: connected ? '#4caf50' : reconnecting ? '#ff9800' : '#ccc', borderColor: connected ? '#388e3c' : reconnecting ? '#ff9800' : '#888'}}></span>
+                  <span className="ping-text">{ping !== null ? `${ping} ms` : reconnecting ? 'Recon.' : '--'}</span>
+                </div>
+              </div>
+            </div>
+            <button
+              className={`connect-btn ${connected ? 'disconnect' : 'connect'}`}
+              onClick={connected ? handleDisconnect : handleConnect}
+              disabled={connecting}
+            >
+              {connected ? 'Disconnect' : 'Connect'}
+            </button>
           </div>
-          <div className="status-block">
-            <span className="status-dot" style={{background: connected ? '#4caf50' : reconnecting ? '#ff9800' : '#ccc', borderColor: connected ? '#388e3c' : reconnecting ? '#ff9800' : '#888'}}></span>
-            <span className="ping-text">{ping !== null ? `${ping} ms` : reconnecting ? 'Recon.' : '--'}</span>
+
+          <div className="account-panel" style={{marginTop: 10}}>
+            <h2 style={{marginTop: 0, marginBottom: 12, textAlign: 'left', width: '100%', display: 'block'}}>Contratos por Categoria</h2>
+            <ul style={{listStyle: 'none', margin: 0, padding: 0, width: '100%', display: 'block', marginTop: 0}}>
+              {CATEGORIES.map((cat) => (
+                <li key={cat} style={{marginBottom: 2, width: '100%'}}>
+                  <button className="symbol-btn" style={{textAlign: 'left', width: '100%', display: 'block'}} onClick={() => handleCategoryClick(cat)}>
+                    {cat}
+                  </button>
+                  {expandedCategory === cat && (
+                    <div className="contracts-scroll" style={{marginLeft: 8}}>
+                      {categoryLoading[cat] && <div>Carregando contratos...</div>}
+                      {!categoryLoading[cat] && (!categorySymbols[cat] || categorySymbols[cat].length === 0) && (
+                        <div style={{fontSize: 11, color: '#888'}}>Nenhum símbolo encontrado nesta categoria</div>
+                      )}
+                      {!categoryLoading[cat] && categorySymbols[cat] && categorySymbols[cat].length > 0 && (!categoryContracts[cat] || Object.keys(categoryContracts[cat]).length === 0) && (
+                        <div style={{fontSize: 11, color: '#888'}}>Carregando contratos para esta categoria...</div>
+                      )}
+                      {!categoryLoading[cat] && categorySymbols[cat] && categorySymbols[cat].length > 0 && categoryContracts[cat] && Object.keys(categoryContracts[cat]).length > 0 && (
+                        <ul style={{margin: '2px 0 6px 0', padding: 0}}>
+                          {Object.entries(categoryContracts[cat]).map(([apiCategory, contracts]) => {
+                            if (!contracts || !Array.isArray(contracts)) {
+                              return null;
+                            }
+                            return (
+                              <li key={apiCategory} style={{fontSize: 11, marginBottom: 4}}>
+                                <strong>{apiCategory}</strong>
+                                <ul style={{margin: '2px 0 0 10px', padding: 0}}>
+                                  {contracts.length > 0 ? contracts.map((contract, index) => {
+                                    if (!contract) return null;
+                                    return (
+                                      <li key={`${contract.symbol || 'unknown'}-${contract.contract_type || index}-${contract.display_name || apiCategory}-${index}-${Date.now()}`} style={{fontSize: 10}}>
+                                        <button 
+                                          style={{
+                                            background: 'none', 
+                                            border: 'none', 
+                                        textAlign: 'left', 
+                                        padding: '2px 0', 
+                                        cursor: 'pointer',
+                                        color: '#3f51b5',
+                                        fontSize: '10px',
+                                        width: '100%'
+                                      }}
+                                      onClick={() => handleContractSelect(contract)}
+                                    >
+                                      <span style={{color:'#888'}}>{contract.symbol}:</span> {contract.contract_type_display}
+                                    </button>
+                                  </li>
+                                    );
+                                  }) : <li style={{fontSize: 10, color: '#888'}}>Nenhum contrato disponível</li>}
+                                </ul>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
           </div>
-          <button
-            className={`connect-btn ${connected ? 'disconnect' : 'connect'}`}
-            onClick={connected ? handleDisconnect : handleConnect}
-            disabled={connecting}
-          >
-            {connected ? 'Disconnect' : 'Connect'}
-          </button>
         </div>
-        <div className="account-panel" style={{marginTop: 180, marginLeft: 0, width: 320, boxSizing: 'border-box'}}>
-          <h2 style={{marginTop: 0, marginBottom: 0, textAlign: 'left', width: '100%', display: 'block'}}>Contratos por Categoria</h2>
-          <ul style={{listStyle: 'none', margin: 0, padding: 0, width: '100%', display: 'block', marginTop: 12, clear: 'both'}}>
-            {CATEGORIES.map((cat) => (
-              <li key={cat} style={{marginBottom: 2, width: '100%'}}>
-                <button className="symbol-btn" style={{textAlign: 'left', width: '100%', display: 'block'}} onClick={() => handleCategoryClick(cat)}>
-                  {cat}
+
+        {/* Card de Proposta */}
+        <div className="proposal-panel" style={{position: 'relative'}}>
+          <h2>Proposta</h2>
+          
+          {selectedContract ? (
+            <>
+              <div className="contract-info">
+                <div className="contract-name">{selectedContract.contract_type_display}</div>
+                <div className="contract-details">
+                  {selectedContract.symbol} • {selectedContract.contract_category_display}
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Stake</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className={`form-input ${stakeError ? 'error' : ''}`}
+                  value={stake}
+                  onChange={handleStakeChange}
+                  placeholder="Digite o valor"
+                />
+                {stakeError && <span className="error-message">{stakeError}</span>}
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Duração</label>
+                <div className="duration-container">
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input duration-input"
+                    value={duration}
+                    onChange={handleDurationChange}
+                    placeholder="Tempo"
+                  />
+                  <select
+                    className="form-select duration-select"
+                    value={durationUnit}
+                    onChange={handleDurationUnitChange}
+                  >
+                    <option value="t">Ticks</option>
+                    <option value="s">Segundos</option>
+                    <option value="m">Minutos</option>
+                    <option value="h">Horas</option>
+                    <option value="d">Dias</option>
+                  </select>
+                </div>
+              </div>
+
+              {selectedContract.barriers === 1 && (
+                <div className="form-group">
+                  <label className="form-label">Barreira</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={barrier}
+                    onChange={handleBarrierChange}
+                    placeholder="Digite a barreira"
+                  />
+                </div>
+              )}
+
+              {['DIGITEVEN', 'DIGITODD', 'DIGITOVER', 'DIGITUNDER', 'DIGITDIFF', 'DIGITMATCH'].includes(selectedContract.contract_type) && (
+                <div className="form-group">
+                  <label className="form-label">Dígito</label>
+                  <select
+                    className="form-select"
+                    value={digit}
+                    onChange={handleDigitChange}
+                  >
+                    <option value="">Selecione um dígito</option>
+                    {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">Payout Estimado</label>
+                <input
+                  type="text"
+                  className="payout-field"
+                  value={proposal ? `$${proposal.payout?.toFixed(2) || '0.00'}` : '$0.00'}
+                  readOnly
+                />
+                <button 
+                  onClick={() => {
+                    console.log('🟡 TESTE MANUAL - Iniciando calculateProposal()');
+                    calculateProposal();
+                  }}
+                  style={{
+                    marginTop: '10px',
+                    padding: '8px 16px',
+                    backgroundColor: '#ff9800',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  🔧 Testar Cálculo Manual
                 </button>
-                {expandedCategory === cat && (
-                  <div style={{marginLeft: 8}}>
-                    {categoryLoading[cat] && <div>Carregando contratos...</div>}
-                    {!categoryLoading[cat] && (!categorySymbols[cat] || categorySymbols[cat].length === 0) && (
-                      <div style={{fontSize: 11, color: '#888'}}>Nenhum símbolo encontrado nesta categoria</div>
-                    )}
-                    {!categoryLoading[cat] && categorySymbols[cat] && categorySymbols[cat].length > 0 && categoryContracts[cat] && Object.keys(categoryContracts[cat]).length > 0 && (
-                      <ul style={{margin: '2px 0 6px 0', padding: 0}}>
-                        {Object.entries(categoryContracts[cat]).map(([apiCategory, contracts]) => (
-                          <li key={apiCategory} style={{fontSize: 11, marginBottom: 4}}>
-                            <strong>{apiCategory}</strong>
-                            <ul style={{margin: '2px 0 0 10px', padding: 0}}>
-                              {contracts.length > 0 ? contracts.map(contract => (
-                                <li key={contract.symbol + contract.contract_type} style={{fontSize: 10}}>
-                                  <span style={{color:'#888'}}>{contract.symbol}:</span> {contract.contract_type_display}
-                                </li>
-                              )) : <li style={{fontSize: 10, color: '#888'}}>Nenhum contrato disponível</li>}
-                            </ul>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {!categoryLoading[cat] && categorySymbols[cat] && categorySymbols[cat].length > 0 && (!categoryContracts[cat] || Object.keys(categoryContracts[cat]).length === 0) && (
-                      <div style={{fontSize: 11, color: '#888'}}>Clique para carregar contratos dos símbolos.</div>
-                    )}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
+              </div>
+
+              {proposalLoading && (
+                <div style={{textAlign: 'center', padding: '10px', color: '#666', fontSize: '11px'}}>
+                  Calculando proposta...
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{textAlign: 'center', padding: '20px', color: '#888', fontSize: '12px'}}>
+              Selecione um contrato para ver a proposta
+            </div>
+          )}
         </div>
       </div>
     </div>
