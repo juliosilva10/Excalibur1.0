@@ -39,13 +39,14 @@ class ProposalAPI {
           this.connection.removeEventListener('message', handleMessage);
           if (data.error) {
             console.error('🟠 ❌ Erro da API:', data.error);
+            console.error('🟠 ❌ Detalhes do erro:', JSON.stringify(data.error, null, 2));
             reject(data.error);
           } else {
             console.log('🟠 ✅ PROPOSTA RECEBIDA:', data.proposal);
             resolve(data.proposal);
           }
         } else {
-          console.log('🟠 ⏭️ Mensagem ignorada');
+          console.log('🟠 ⏭️ Mensagem ignorada - msg_type:', data.msg_type, 'req_id esperado:', reqId, 'recebido:', data.req_id);
         }
       };
 
@@ -79,7 +80,8 @@ class ProposalAPI {
       basis = 'stake',
       currency = 'USD',
       barrier,
-      barrier2
+      barrier2,
+      growth_rate
     } = params;
 
     console.log('🔴 Parâmetros extraídos:');
@@ -88,6 +90,7 @@ class ProposalAPI {
     console.log('🔴   amount:', amount);
     console.log('🔴   duration:', duration);
     console.log('🔴   duration_unit:', duration_unit);
+    console.log('🔴   growth_rate:', growth_rate);
 
     // Estrutura correta conforme documentação da API Deriv
     const proposalRequest = {
@@ -98,13 +101,15 @@ class ProposalAPI {
       currency
     };
 
-    // Para contratos ACCU (Accumulator), não adicionar duration/duration_unit
+    // Para contratos ACCU (Accumulator), adicionar growth_rate em vez de duration
     if (contract_type !== 'ACCU') {
       proposalRequest.duration = parseInt(duration);
       proposalRequest.duration_unit = duration_unit;
       console.log('🔴 ⏰ Duração adicionada para contrato não-ACCU:', proposalRequest.duration, proposalRequest.duration_unit);
     } else {
-      console.log('🔴 ⏰ Contrato ACCU detectado - sem parâmetros de duração');
+      // Contratos ACCU precisam de growth_rate obrigatório
+      proposalRequest.growth_rate = growth_rate || 0.01; // 1% como padrão se não fornecido
+      console.log('🔴 📈 Contrato ACCU detectado - growth_rate adicionado:', proposalRequest.growth_rate);
     }
 
     console.log('🔴 Estrutura inicial da requisição:', proposalRequest);

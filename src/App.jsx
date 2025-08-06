@@ -133,9 +133,22 @@ function App() {
   const [duration, setDuration] = useState('5'); // Valor padrão
   const [durationUnit, setDurationUnit] = useState('m');
   const [barrier, setBarrier] = useState('');
+  const [availableBarriers, setAvailableBarriers] = useState([]); // Barreiras disponíveis
+  const [growthRate, setGrowthRate] = useState('0.01'); // Taxa de crescimento para contratos ACCU (1% padrão)
   const [digit, setDigit] = useState('');
   const [proposal, setProposal] = useState(null);
   const [proposalLoading, setProposalLoading] = useState(false);
+  
+  // Estados para simulação do Accumulator em tempo real
+  const [currentSpot, setCurrentSpot] = useState(null);
+  const [accumulatorData, setAccumulatorData] = useState({
+    initialSpot: null,
+    upperBarrier: null,
+    lowerBarrier: null,
+    ticksCount: 0,
+    currentPayout: 0,
+    isActive: false
+  });
   
   const wsRef = useRef(null);
   const apiRef = useRef(null);
@@ -163,6 +176,7 @@ function App() {
         fetchAccountInfo();
         startPing();
         fetchInitialSymbols();
+        subscribeToTicks(); // Iniciar subscrição de ticks para Accumulator
       };
       api.onDisconnect = () => {
         setConnected(false);
@@ -265,7 +279,8 @@ function App() {
               if (!contractsByApiCategory[cat]) contractsByApiCategory[cat] = [];
               contractsByApiCategory[cat].push({
                 ...contract,
-                symbol: symbolObj.display_name
+                symbol_code: symbolObj.symbol, // Código real do símbolo (ex: R_10)
+                symbol: symbolObj.display_name // Nome de exibição (ex: Volatility 10 Index)
               });
             });
           } catch {
@@ -281,10 +296,11 @@ function App() {
   }
 
   // Funções para o card de proposta
-  const handleContractSelect = (contract) => {
+  const handleContractSelect = async (contract) => {
     console.log('🔵 CONTRATO SELECIONADO:', contract);
     console.log('🔵 Tipo do contrato:', contract.contract_type);
-    console.log('🔵 Símbolo:', contract.symbol);
+    console.log('🔵 Símbolo (nome):', contract.symbol);
+    console.log('🔵 Símbolo (código):', contract.symbol_code);
     console.log('🔵 Barreiras necessárias:', contract.barriers);
     
     setSelectedContract(contract);
@@ -294,14 +310,47 @@ function App() {
     setBarrier('');
     setDigit('');
     setProposal(null);
+    setAvailableBarriers([]);
     
-    console.log('🔵 Estados atualizados - forçando cálculo em 2 segundos...');
+    // Reset Accumulator data
+    setAccumulatorData({
+      initialSpot: null,
+      upperBarrier: null,
+      lowerBarrier: null,
+      ticksCount: 0,
+      currentPayout: 0,
+      isActive: false
+    });
     
-    // Forçar cálculo da proposta após seleção
-    setTimeout(() => {
-      console.log('🔵 ⏰ TIMEOUT DE SELEÇÃO (2s) executado - chamando calculateProposal');
-      calculateProposal();
-    }, 2000);
+    // Iniciar subscrição aos ticks para o novo contrato
+    if (wsRef.current) {
+      subscribeToTicks();
+    }
+    
+    // Buscar barreiras disponíveis se o contrato precisar
+    if (contract.barriers === 1 && wsRef.current) {
+      try {
+        console.log('🔵 Buscando barreiras disponíveis...');
+        const contractsApi = new ContractsAPI(wsRef.current);
+        const barriers = await contractsApi.getBarriersFor(contract.symbol_code, contract.contract_type);
+        console.log('🔵 Barreiras encontradas:', barriers);
+        setAvailableBarriers(barriers);
+        
+        // Definir uma barreira padrão se houver barreiras disponíveis
+        if (barriers.length > 0) {
+          setBarrier(barriers[0].value);
+          console.log('🔵 Barreira padrão definida:', barriers[0].value);
+        }
+      } catch (error) {
+        console.error('🔵 Erro ao buscar barreiras:', error);
+        setAvailableBarriers([]);
+      }
+    }
+    
+    console.log('🔵 Estados atualizados - calculando IMEDIATAMENTE...');
+    
+    // Calcular proposta imediatamente após seleção
+    calculateProposal();
   };
 
   const validateStake = (value) => {
@@ -341,6 +390,57 @@ function App() {
     setDigit(e.target.value);
   };
 
+  // Função para calcular payout do Accumulator em tempo real
+  const calculateAccumulatorPayout = (initialStake, growthRateValue, ticksCount) => {
+    if (!initialStake || !growthRateValue || ticksCount <= 0) {
+      return parseFloat(initialStake || 0);
+    }
+    
+    // Fórmula: Payout = Stake_inicial * (1 + growth_rate)^ticks
+    const payout = parseFloat(initialStake) * Math.pow(1 + parseFloat(growthRateValue), ticksCount);
+    return payout;
+  };
+
+  // Função para calcular barreiras do Accumulator
+  const calculateAccumulatorBarriers = (spotPrice, growthRateValue) => {
+    if (!spotPrice || !growthRateValue) return { upper: null, lower: null };
+    
+    // Quanto maior o growth rate, menor a faixa (mais arriscado)
+    // Faixa típica para Accumulator é de aproximadamente 0.5% a 2.5% do spot price
+    const barrierPercentage = 0.01 + (0.025 - parseFloat(growthRateValue)) * 0.5;
+    const upperBarrier = spotPrice * (1 + barrierPercentage);
+    const lowerBarrier = spotPrice * (1 - barrierPercentage);
+    
+    return {
+      upper: upperBarrier,
+      lower: lowerBarrier
+    };
+  };
+
+  // Simular tick updates para Accumulator
+  const startAccumulatorSimulation = () => {
+    if (selectedContract?.contract_type !== 'ACCU' || !currentSpot || !stake) {
+      return;
+    }
+
+    const barriers = calculateAccumulatorBarriers(currentSpot, growthRate);
+    
+    setAccumulatorData({
+      initialSpot: currentSpot,
+      upperBarrier: barriers.upper,
+      lowerBarrier: barriers.lower,
+      ticksCount: 0,
+      currentPayout: parseFloat(stake),
+      isActive: true
+    });
+
+    console.log('🟢 Accumulator iniciado:');
+    console.log('  Spot inicial:', currentSpot);
+    console.log('  Barreira superior:', barriers.upper);
+    console.log('  Barreira inferior:', barriers.lower);
+    console.log('  Growth rate:', growthRate);
+  };
+
   const calculateProposal = async () => {
     console.log('🟡 === CALCULATE PROPOSAL INICIADO ===');
     console.log('🟡 selectedContract:', !!selectedContract, selectedContract?.contract_type);
@@ -354,11 +454,14 @@ function App() {
       return;
     }
     
-    if (!selectedContract || !stake || !duration) {
+    // Para contratos ACCU, duration não é necessário
+    const needsDuration = selectedContract?.contract_type !== 'ACCU';
+    
+    if (!selectedContract || !stake || (needsDuration && !duration)) {
       console.log('🟡 ❌ Retornando - dados básicos faltando');
       console.log('🟡 selectedContract:', !!selectedContract);
       console.log('🟡 stake:', stake);
-      console.log('🟡 duration:', duration);
+      console.log('🟡 duration:', duration, '(necessário:', needsDuration, ')');
       return;
     }
     
@@ -372,19 +475,21 @@ function App() {
       // Usar dados reais do formulário com estrutura correta da API
       const proposalParams = {
         contract_type: selectedContract.contract_type,
-        symbol: "R_100", // Símbolo padrão para teste
+        symbol: selectedContract.symbol_code, // Usar o código do símbolo (ex: R_10)
         amount: parseFloat(stake),
         basis: "stake", // Voltando para stake como padrão da API
         currency: "USD"
       };
 
-      // Para contratos ACCU (Accumulator), não usar duration/duration_unit
+      // Para contratos ACCU (Accumulator), usar growth_rate em vez de duration
       if (selectedContract.contract_type !== 'ACCU') {
         proposalParams.duration = parseInt(duration);
         proposalParams.duration_unit = durationUnit;
         console.log('🟡 ⏰ Duração adicionada para contrato não-ACCU:', proposalParams.duration, proposalParams.duration_unit);
       } else {
-        console.log('🟡 ⏰ Contrato ACCU detectado - sem parâmetros de duração');
+        // Contratos ACCU precisam de growth_rate obrigatório
+        proposalParams.growth_rate = parseFloat(growthRate);
+        console.log('🟡 📈 Contrato ACCU detectado - growth_rate adicionado:', proposalParams.growth_rate);
       }
 
       console.log('🟡 📝 Parâmetros básicos criados:', proposalParams);
@@ -419,11 +524,35 @@ function App() {
       const result = await proposalApi.getContractProposal(proposalParams);
       console.log('🟡 ✅ RESULTADO RECEBIDO:', result);
       
-      if (result && result.payout) {
-        setProposal(result);
-        console.log('Proposta salva com sucesso - payout:', result.payout);
+      if (result) {
+        console.log('🟡 📊 RESULTADO COMPLETO DA API:', JSON.stringify(result, null, 2));
+        
+        // Para contratos ACCU, verificar todos os campos possíveis de payout
+        if (selectedContract.contract_type === 'ACCU') {
+          // Para ACCU, usar ask_price ou payout, NUNCA usar stake como fallback
+          const accuPayout = result.ask_price || result.payout || null;
+          if (accuPayout) {
+            setProposal({
+              ...result,
+              payout: accuPayout
+            });
+            console.log('🟡 💰 Proposta ACCU salva - valores encontrados:');
+            console.log('  ask_price:', result.ask_price);
+            console.log('  payout:', result.payout);
+            console.log('  valor final usado:', accuPayout);
+          } else {
+            console.warn('🟡 ⚠️ ACCU: Nenhum valor válido encontrado na resposta da API');
+            setProposal(null);
+          }
+        } else if (result.payout || result.ask_price) {
+          setProposal(result);
+          console.log('🟡 ✅ Proposta salva com sucesso - payout:', result.payout || result.ask_price);
+        } else {
+          console.warn('🟡 ⚠️ Resultado da proposta não contém payout válido:', result);
+          setProposal(null);
+        }
       } else {
-        console.warn('Resultado da proposta não contém payout válido:', result);
+        console.warn('🟡 ❌ Nenhum resultado recebido da API');
         setProposal(null);
       }
     } catch (error) {
@@ -437,29 +566,30 @@ function App() {
   };
 
   // Executar cálculo quando parâmetros mudarem
-  // Executar cálculo quando parâmetros mudarem
   useEffect(() => {
     console.log('useEffect triggered - recalculando proposta');
-    console.log('selectedContract:', !!selectedContract);
+    console.log('selectedContract:', !!selectedContract, selectedContract?.contract_type);
     console.log('stake:', stake);
     console.log('duration:', duration);
     console.log('connected:', connected);
+    console.log('stakeError:', stakeError);
     
-    if (selectedContract && stake && duration && connected && !stakeError) {
-      console.log('Condições atendidas - iniciando timer para recálculo');
-      const timer = setTimeout(() => {
-        console.log('🔵 ⏰ TIMEOUT DO USEEFFECT (1s) executado - chamando calculateProposal');
-        calculateProposal();
-      }, 1000); // 1 segundo de debounce
-      
-      return () => {
-        console.log('Limpando timer');
-        clearTimeout(timer);
-      };
+    // Para contratos ACCU, duration não é necessário
+    const needsDuration = selectedContract?.contract_type !== 'ACCU';
+    
+    if (selectedContract && stake && connected && !stakeError && (!needsDuration || duration)) {
+      console.log('✅ Condições atendidas - calculando IMEDIATAMENTE');
+      // Remover timeout - calcular imediatamente
+      calculateProposal();
     } else {
-      console.log('Condições não atendidas para recálculo automático');
+      console.log('❌ Condições não atendidas para recálculo automático');
+      if (!selectedContract) console.log('  - selectedContract está vazio');
+      if (!stake) console.log('  - stake está vazio');
+      if (needsDuration && !duration) console.log('  - duration está vazio e é necessário');
+      if (!connected) console.log('  - não está conectado');
+      if (stakeError) console.log('  - há erro no stake:', stakeError);
     }
-  }, [selectedContract, stake, duration, durationUnit, barrier, digit, connected, stakeError]);
+  }, [selectedContract, stake, duration, durationUnit, barrier, digit, growthRate, connected, stakeError]);
 
   async function handleSymbolClick(symbol) {
     if (expandedSymbol === symbol) {
@@ -500,6 +630,81 @@ function App() {
       }
     }, 1000);
   }
+
+  // Subscrever a ticks para simulação do Accumulator
+  const subscribeToTicks = () => {
+    if (!wsRef.current || !selectedContract?.symbol_code) return;
+
+    // Listener para receber ticks em tempo real
+    const tickHandler = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        // Processar ticks para o símbolo selecionado
+        if (data.msg_type === 'tick' && data.tick) {
+          const newSpot = data.tick.quote;
+          setCurrentSpot(newSpot);
+          
+          console.log('📊 Novo tick recebido:', newSpot);
+          
+          // Atualizar Accumulator se ativo
+          if (accumulatorData.isActive && selectedContract?.contract_type === 'ACCU') {
+            updateAccumulatorTick(newSpot);
+          }
+        }
+      } catch (error) {
+        console.error('Erro ao processar tick:', error);
+      }
+    };
+
+    wsRef.current.addEventListener('message', tickHandler);
+
+    // Subscrever aos ticks do símbolo selecionado
+    if (selectedContract?.symbol_code) {
+      const tickRequest = {
+        ticks: selectedContract.symbol_code,
+        subscribe: 1
+      };
+      
+      wsRef.current.send(JSON.stringify(tickRequest));
+      console.log('🔔 Subscrito aos ticks de:', selectedContract.symbol_code);
+    }
+  };
+
+  // Atualizar Accumulator com novo tick
+  const updateAccumulatorTick = (newSpot) => {
+    setAccumulatorData(prev => {
+      if (!prev.isActive) return prev;
+
+      // Verificar se está dentro das barreiras
+      const isWithinBarriers = newSpot >= prev.lowerBarrier && newSpot <= prev.upperBarrier;
+      
+      if (isWithinBarriers) {
+        // Incrementar ticks e recalcular payout
+        const newTicksCount = prev.ticksCount + 1;
+        const newPayout = calculateAccumulatorPayout(stake, growthRate, newTicksCount);
+        
+        console.log(`🟢 Tick #${newTicksCount} dentro da barreira:`, newSpot);
+        console.log(`💰 Novo payout: $${newPayout.toFixed(2)}`);
+        
+        return {
+          ...prev,
+          ticksCount: newTicksCount,
+          currentPayout: newPayout
+        };
+      } else {
+        // Fora da barreira - contrato termina
+        console.log('🔴 Tick fora da barreira:', newSpot);
+        console.log('🔴 Accumulator finalizado - perda total da stake');
+        
+        return {
+          ...prev,
+          isActive: false,
+          currentPayout: 0 // Perde tudo
+        };
+      }
+    });
+  };
 
   return (
     <div className="app" style={{display: 'block'}}>
@@ -645,16 +850,22 @@ function App() {
                 </div>
               </div>
 
-              {selectedContract.barriers === 1 && (
+              {/* Campo Growth Rate para contratos ACCU */}
+              {selectedContract.contract_type === 'ACCU' && (
                 <div className="form-group">
-                  <label className="form-label">Barreira</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={barrier}
-                    onChange={handleBarrierChange}
-                    placeholder="Digite a barreira"
-                  />
+                  <label className="form-label">Taxa de Crescimento</label>
+                  <select
+                    className="form-select"
+                    value={growthRate}
+                    onChange={(e) => setGrowthRate(e.target.value)}
+                  >
+                    <option value="0.01">1% (0.01)</option>
+                    <option value="0.02">2% (0.02)</option>
+                    <option value="0.03">3% (0.03)</option>
+                    <option value="0.04">4% (0.04)</option>
+                    <option value="0.05">5% (0.05)</option>
+                  </select>
+                  <small className="form-helper">Valores válidos: 1%, 2%, 3%, 4% ou 5%</small>
                 </div>
               )}
 
@@ -674,31 +885,115 @@ function App() {
                 </div>
               )}
 
+              {/* Campo de Barreira - mostrar apenas se o contrato precisar */}
+              {selectedContract && selectedContract.barriers === 1 && (
+                <div className="form-group">
+                  <label className="form-label">Barreira</label>
+                  {availableBarriers.length > 0 ? (
+                    <select
+                      className="form-input"
+                      value={barrier}
+                      onChange={handleBarrierChange}
+                    >
+                      <option value="">Selecione uma barreira</option>
+                      {availableBarriers.map((b, index) => (
+                        <option key={index} value={b.value}>
+                          {b.display} {b.relative && `(${b.relative})`}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Digite a barreira"
+                      value={barrier}
+                      onChange={handleBarrierChange}
+                      step="0.1"
+                    />
+                  )}
+                </div>
+              )}
+
               <div className="form-group">
-                <label className="form-label">Payout Estimado</label>
+                <label className="form-label">Payout</label>
                 <input
                   type="text"
                   className="payout-field"
-                  value={proposal ? `$${proposal.payout?.toFixed(2) || '0.00'}` : '$0.00'}
+                  value={
+                    proposalLoading 
+                      ? "Calculando..." 
+                      : selectedContract.contract_type === 'ACCU' 
+                        ? (accumulatorData.isActive 
+                            ? `$${accumulatorData.currentPayout.toFixed(2)} (SIMULAÇÃO)` 
+                            : (proposal?.ask_price ? `$${proposal.ask_price.toFixed(2)}` : 
+                               (proposal?.payout ? `$${proposal.payout.toFixed(2)}` : "Aguardando API...")))
+                        : (proposal?.payout ? `$${proposal.payout.toFixed(2)}` : "Aguardando API...")
+                  }
                   readOnly
-                />
-                <button 
-                  onClick={() => {
-                    console.log('🟡 TESTE MANUAL - Iniciando calculateProposal()');
-                    calculateProposal();
-                  }}
                   style={{
-                    marginTop: '10px',
-                    padding: '8px 16px',
-                    backgroundColor: '#ff9800',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer'
+                    color: proposalLoading ? '#999' : 
+                           accumulatorData.isActive ? '#2ed573' :
+                           (proposal ? '#000' : '#999'),
+                    fontStyle: proposalLoading || (!proposal && !accumulatorData.isActive) ? 'italic' : 'normal',
+                    backgroundColor: selectedContract.contract_type === 'ACCU' && accumulatorData.isActive ? '#e8f5e8' : 'white',
+                    fontWeight: accumulatorData.isActive ? 'bold' : 'normal'
                   }}
-                >
-                  🔧 Testar Cálculo Manual
-                </button>
+                />
+                {selectedContract.contract_type === 'ACCU' && (
+                  <div>
+                    <small className="form-helper">
+                      {proposalLoading 
+                        ? 'Buscando dados da API Deriv...'
+                        : accumulatorData.isActive 
+                          ? `⚡ SIMULAÇÃO ATIVA: ${accumulatorData.ticksCount} ticks | +${(parseFloat(growthRate) * 100).toFixed(1)}% por tick`
+                          : proposal 
+                            ? `📊 Valor inicial da API | Cresce ${(parseFloat(growthRate) * 100).toFixed(1)}% por tick` 
+                            : '⏳ Conectando com API para obter payout real...'}
+                    </small>
+                    {accumulatorData.isActive && (
+                      <div style={{fontSize: '10px', color: '#666', marginTop: '4px'}}>
+                        <div>💹 Spot: {currentSpot?.toFixed(4) || '---'}</div>
+                        <div>🎯 Range: {accumulatorData.lowerBarrier?.toFixed(4)} - {accumulatorData.upperBarrier?.toFixed(4)}</div>
+                        <button 
+                          onClick={() => setAccumulatorData(prev => ({...prev, isActive: false}))}
+                          style={{
+                            fontSize: '10px', 
+                            padding: '2px 6px', 
+                            marginTop: '4px',
+                            backgroundColor: '#ff4757',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '3px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          🛑 Parar
+                        </button>
+                      </div>
+                    )}
+                    {!accumulatorData.isActive && selectedContract.contract_type === 'ACCU' && currentSpot && (
+                      <button 
+                        onClick={startAccumulatorSimulation}
+                        style={{
+                          fontSize: '11px', 
+                          padding: '4px 8px', 
+                          marginTop: '4px',
+                          backgroundColor: '#2ed573',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '3px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        🚀 Iniciar Simulação
+                      </button>
+                    )}
+                  </div>
+                )}
+                {selectedContract.contract_type !== 'ACCU' && !proposal && !proposalLoading && (
+                  <small className="form-helper">⏳ Obtendo payout da API Deriv...</small>
+                )}
               </div>
 
               {proposalLoading && (
